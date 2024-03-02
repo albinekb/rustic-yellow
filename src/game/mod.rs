@@ -16,7 +16,11 @@ pub mod scripts;
 
 pub fn resources_root() -> Option<PathBuf> {
     if std::env::var_os("CARGO").is_some() {
-        return Some(PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR")?));
+        println!("cargo");
+        let p = Some(PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR")?));
+
+        println!("{:?}", p);
+        return p;
     }
 
     // TODO: support for other platforms

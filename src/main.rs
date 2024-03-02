@@ -1,9 +1,29 @@
+use artem::config::{self, TargetType};
 use clap::Parser;
-use glium::glutin::platform::run_return::EventLoopExtRunReturn;
+
+use crossterm::terminal::{
+    BeginSynchronizedUpdate, ClearType, EndSynchronizedUpdate, EnterAlternateScreen,
+    LeaveAlternateScreen, SetSize,
+};
+use crossterm::{cursor, queue, style, terminal};
 use rustic_yellow::{Game, KeyboardEvent, PokemonSpecies};
+use std::io::{self, stdout, Write};
+use std::num::NonZeroU32;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{atomic::AtomicU64, Arc};
 use std::thread;
+use std::time::Duration;
+
+use crossterm::{
+    cursor::position,
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode},
+};
+use futures::{future::FutureExt, select, StreamExt};
+use futures_timer::Delay;
+
+use crossterm::event::{poll, read};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -13,29 +33,11 @@ struct Args {
     starter: String,
 }
 
-#[cfg(target_os = "windows")]
-fn create_window_builder() -> glium::glutin::window::WindowBuilder {
-    use glium::glutin::platform::windows::WindowBuilderExtWindows;
-    glium::glutin::window::WindowBuilder::new()
-        .with_drag_and_drop(false)
-        .with_inner_size(glium::glutin::dpi::LogicalSize::<u32>::from((
-            rustic_yellow::SCREEN_W as u32,
-            rustic_yellow::SCREEN_H as u32,
-        )))
-        .with_title("Rustic Yellow")
-}
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    enable_raw_mode().unwrap();
+    execute!(std::io::stdout(), EnterAlternateScreen).unwrap();
 
-#[cfg(not(target_os = "windows"))]
-fn create_window_builder() -> glium::glutin::window::WindowBuilder {
-    glium::glutin::window::WindowBuilder::new()
-        .with_inner_size(glium::glutin::dpi::LogicalSize::<u32>::from((
-            rustic_yellow::SCREEN_W as u32,
-            rustic_yellow::SCREEN_H as u32,
-        )))
-        .with_title("Rustic Yellow")
-}
-
-fn main() {
     env_logger::init();
 
     let args = Args::parse();
@@ -46,132 +48,148 @@ fn main() {
     let (sender1, receiver1) = mpsc::channel();
     let (sender2, receiver2) = mpsc::sync_channel(1);
 
-    let mut eventloop = glium::glutin::event_loop::EventLoop::new();
-    let window_builder = create_window_builder();
-    let context_builder = glium::glutin::ContextBuilder::new();
-    let display =
-        glium::backend::glutin::Display::new(window_builder, context_builder, &eventloop).unwrap();
-    set_window_size(display.gl_window().window());
-
-    let mut texture = glium::texture::texture2d::Texture2d::empty_with_format(
-        &display,
-        glium::texture::UncompressedFloatFormat::U8U8U8,
-        glium::texture::MipmapsOption::NoMipmap,
-        rustic_yellow::SCREEN_W as u32,
-        rustic_yellow::SCREEN_H as u32,
-    )
-    .unwrap();
-
     let gamethread = thread::spawn(move || run_game(sender2, receiver1, starter));
 
-    let periodic = timer_periodic(render_delay.clone());
+    // let periodic = timer_periodic(render_delay.clone());
 
-    #[rustfmt::skip]
-    eventloop.run_return(move |ev, _evtarget, controlflow| {
-        use glium::glutin::event::ElementState::{Pressed, Released};
-        use glium::glutin::event::VirtualKeyCode;
-        use glium::glutin::event::{Event, KeyboardInput, WindowEvent};
+    execute!(
+        std::io::stdout(),
+        style::ResetColor,
+        terminal::SetSize(
+            rustic_yellow::SCREEN_W as u16,
+            rustic_yellow::SCREEN_H as u16
+        ),
+        terminal::Clear(ClearType::All),
+        cursor::Hide,
+        cursor::MoveTo(0, 0),
+    )?;
 
-        let mut stop = false;
-        match ev {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => stop = true,
-                WindowEvent::KeyboardInput { input, .. } => match input {
-                    KeyboardInput { state: Pressed, virtual_keycode: Some(VirtualKeyCode::Key1), .. }
-                        => render_delay.store(16_743, std::sync::atomic::Ordering::Relaxed), // 59.7 fps
-                    KeyboardInput { state: Pressed, virtual_keycode: Some(VirtualKeyCode::Key2), .. }
-                        => render_delay.store(10_000, std::sync::atomic::Ordering::Relaxed), // 100 fps
-                    KeyboardInput { state: Pressed, virtual_keycode: Some(VirtualKeyCode::Key3), .. }
-                        => render_delay.store(8_333, std::sync::atomic::Ordering::Relaxed), // 120 fps
-                    KeyboardInput { state: Pressed, virtual_keycode: Some(VirtualKeyCode::Key4), .. }
-                        => render_delay.store(5_000, std::sync::atomic::Ordering::Relaxed), // 200 fps
-                    KeyboardInput { state: Pressed, virtual_keycode: Some(VirtualKeyCode::Key5), .. }
-                        => render_delay.store(4_166, std::sync::atomic::Ordering::Relaxed), // 240 fps
-                    KeyboardInput { state: Pressed, virtual_keycode: Some(VirtualKeyCode::Key6), .. }
-                        => render_delay.store(2_500, std::sync::atomic::Ordering::Relaxed), // 400 fps
-                    KeyboardInput { state: Pressed, virtual_keycode: Some(glutinkey), modifiers, .. } => {
-                        if let Some(key) = glutin_to_keyboard(glutinkey) {
-                            let _ = sender1.send(KeyboardEvent::Down { key, shift: modifiers.shift() });
-                        }
-                    },
-                    KeyboardInput { state: Released, virtual_keycode: Some(glutinkey), .. } => {
-                        if let Some(key) = glutin_to_keyboard(glutinkey) {
-                            let _ = sender1.send(KeyboardEvent::Up { key });
-                        }
-                    }
-                    _ => (),
-                },
-                _ => (),
-            },
-            Event::MainEventsCleared => {
-                periodic.recv().unwrap();
+    let mut reader = EventStream::new();
+    let rnd_delay = render_delay.load(std::sync::atomic::Ordering::Relaxed);
+
+    let mut stop = false;
+    loop {
+        if stop {
+            break;
+        }
+        let mut delay = Delay::new(Duration::from_micros(rnd_delay)).fuse();
+        let mut event = reader.next().fuse();
+
+        select! {
+            _ = delay => {
+                if stop {
+                    break;
+                }
 
                 match receiver2.try_recv() {
-                    Ok(data) => { recalculate_screen(&display, &mut texture, &data); },
-                    Err(mpsc::TryRecvError::Empty) => (),
-                    Err(..) => stop = true, // Remote end has hung-up
-                }
-            }
-            _ => (),
-        }
-        if stop {
-            *controlflow = glium::glutin::event_loop::ControlFlow::Exit;
-        }
-    });
+                    Ok(data) => {
 
+                        recalculate_screen(&data);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => (),
+                    Err(..) => {
+                        // println!("Remote end has hung-up");
+                        stop = true;
+                    }
+                }
+         },
+
+            maybe_event = event => {
+                match maybe_event {
+                    Some(Ok(event)) => {
+
+                    match event {
+                        Event::Key(event) => match event.code {
+                            KeyCode::Esc => stop = true,
+                            _ => {
+                                if let Some(key) = crossterm_to_keyboard(event.code) {
+                                    let _ = sender1.send(KeyboardEvent::Down {
+                                        key,
+                                        shift: event
+                                            .modifiers
+                                            .contains(crossterm::event::KeyModifiers::SHIFT),
+                                    });
+                                }
+                            }
+                        },
+                        Event::Mouse(event) => {
+                            // println!("{:?}", event);
+                        }
+                        _ => (),
+                    }
+                },
+                Some(Err(e)) => {}
+                None => break,
+            }
+            }
+        }
+
+        if stop {
+            break;
+        }
+    }
+
+    execute!(std::io::stdout(), LeaveAlternateScreen).unwrap();
+    disable_raw_mode().unwrap();
     let _ = gamethread.join();
+
+    Ok(())
 }
 
-fn glutin_to_keyboard(
-    key: glium::glutin::event::VirtualKeyCode,
-) -> Option<rustic_yellow::KeyboardKey> {
-    use glium::glutin::event::VirtualKeyCode;
+fn crossterm_to_keyboard(key: crossterm::event::KeyCode) -> Option<rustic_yellow::KeyboardKey> {
     match key {
-        VirtualKeyCode::Escape => Some(rustic_yellow::KeyboardKey::Escape),
-        VirtualKeyCode::Left => Some(rustic_yellow::KeyboardKey::Left),
-        VirtualKeyCode::Up => Some(rustic_yellow::KeyboardKey::Up),
-        VirtualKeyCode::Right => Some(rustic_yellow::KeyboardKey::Right),
-        VirtualKeyCode::Down => Some(rustic_yellow::KeyboardKey::Down),
-        VirtualKeyCode::Back => Some(rustic_yellow::KeyboardKey::Backspace),
-        VirtualKeyCode::Return => Some(rustic_yellow::KeyboardKey::Return),
-        VirtualKeyCode::Space => Some(rustic_yellow::KeyboardKey::Space),
-        VirtualKeyCode::A => Some(rustic_yellow::KeyboardKey::A),
-        VirtualKeyCode::B => Some(rustic_yellow::KeyboardKey::B),
-        VirtualKeyCode::C => Some(rustic_yellow::KeyboardKey::C),
-        VirtualKeyCode::D => Some(rustic_yellow::KeyboardKey::D),
-        VirtualKeyCode::E => Some(rustic_yellow::KeyboardKey::E),
-        VirtualKeyCode::F => Some(rustic_yellow::KeyboardKey::F),
-        VirtualKeyCode::G => Some(rustic_yellow::KeyboardKey::G),
-        VirtualKeyCode::H => Some(rustic_yellow::KeyboardKey::H),
-        VirtualKeyCode::I => Some(rustic_yellow::KeyboardKey::I),
-        VirtualKeyCode::J => Some(rustic_yellow::KeyboardKey::J),
-        VirtualKeyCode::K => Some(rustic_yellow::KeyboardKey::K),
-        VirtualKeyCode::L => Some(rustic_yellow::KeyboardKey::L),
-        VirtualKeyCode::M => Some(rustic_yellow::KeyboardKey::M),
-        VirtualKeyCode::N => Some(rustic_yellow::KeyboardKey::N),
-        VirtualKeyCode::O => Some(rustic_yellow::KeyboardKey::O),
-        VirtualKeyCode::P => Some(rustic_yellow::KeyboardKey::P),
-        VirtualKeyCode::Q => Some(rustic_yellow::KeyboardKey::Q),
-        VirtualKeyCode::R => Some(rustic_yellow::KeyboardKey::R),
-        VirtualKeyCode::S => Some(rustic_yellow::KeyboardKey::S),
-        VirtualKeyCode::T => Some(rustic_yellow::KeyboardKey::T),
-        VirtualKeyCode::U => Some(rustic_yellow::KeyboardKey::U),
-        VirtualKeyCode::V => Some(rustic_yellow::KeyboardKey::V),
-        VirtualKeyCode::W => Some(rustic_yellow::KeyboardKey::W),
-        VirtualKeyCode::X => Some(rustic_yellow::KeyboardKey::X),
-        VirtualKeyCode::Y => Some(rustic_yellow::KeyboardKey::Y),
-        VirtualKeyCode::Z => Some(rustic_yellow::KeyboardKey::Z),
+        crossterm::event::KeyCode::Esc => Some(rustic_yellow::KeyboardKey::Escape),
+        crossterm::event::KeyCode::Left => Some(rustic_yellow::KeyboardKey::Left),
+        crossterm::event::KeyCode::Up => Some(rustic_yellow::KeyboardKey::Up),
+        crossterm::event::KeyCode::Right => Some(rustic_yellow::KeyboardKey::Right),
+        crossterm::event::KeyCode::Down => Some(rustic_yellow::KeyboardKey::Down),
+        crossterm::event::KeyCode::Backspace => Some(rustic_yellow::KeyboardKey::Backspace),
+        crossterm::event::KeyCode::Enter => Some(rustic_yellow::KeyboardKey::Return),
+        crossterm::event::KeyCode::Char(' ') => Some(rustic_yellow::KeyboardKey::Space),
+        crossterm::event::KeyCode::Char('a') => Some(rustic_yellow::KeyboardKey::A),
+        crossterm::event::KeyCode::Char('b') => Some(rustic_yellow::KeyboardKey::B),
+        crossterm::event::KeyCode::Char('c') => Some(rustic_yellow::KeyboardKey::C),
+        crossterm::event::KeyCode::Char('d') => Some(rustic_yellow::KeyboardKey::D),
+        crossterm::event::KeyCode::Char('e') => Some(rustic_yellow::KeyboardKey::E),
+        crossterm::event::KeyCode::Char('f') => Some(rustic_yellow::KeyboardKey::F),
+        crossterm::event::KeyCode::Char('g') => Some(rustic_yellow::KeyboardKey::G),
+        crossterm::event::KeyCode::Char('h') => Some(rustic_yellow::KeyboardKey::H),
+        crossterm::event::KeyCode::Char('i') => Some(rustic_yellow::KeyboardKey::I),
+        crossterm::event::KeyCode::Char('j') => Some(rustic_yellow::KeyboardKey::J),
+        crossterm::event::KeyCode::Char('k') => Some(rustic_yellow::KeyboardKey::K),
+        crossterm::event::KeyCode::Char('l') => Some(rustic_yellow::KeyboardKey::L),
+        crossterm::event::KeyCode::Char('m') => Some(rustic_yellow::KeyboardKey::M),
+        crossterm::event::KeyCode::Char('n') => Some(rustic_yellow::KeyboardKey::N),
+        crossterm::event::KeyCode::Char('o') => Some(rustic_yellow::KeyboardKey::O),
+        crossterm::event::KeyCode::Char('p') => Some(rustic_yellow::KeyboardKey::P),
+        crossterm::event::KeyCode::Char('q') => Some(rustic_yellow::KeyboardKey::Q),
+        crossterm::event::KeyCode::Char('r') => Some(rustic_yellow::KeyboardKey::R),
+        crossterm::event::KeyCode::Char('s') => Some(rustic_yellow::KeyboardKey::S),
+        crossterm::event::KeyCode::Char('t') => Some(rustic_yellow::KeyboardKey::T),
+        crossterm::event::KeyCode::Char('u') => Some(rustic_yellow::KeyboardKey::U),
+        crossterm::event::KeyCode::Char('v') => Some(rustic_yellow::KeyboardKey::V),
+        crossterm::event::KeyCode::Char('w') => Some(rustic_yellow::KeyboardKey::W),
+        crossterm::event::KeyCode::Char('x') => Some(rustic_yellow::KeyboardKey::X),
+        crossterm::event::KeyCode::Char('y') => Some(rustic_yellow::KeyboardKey::Y),
+        crossterm::event::KeyCode::Char('z') => Some(rustic_yellow::KeyboardKey::Z),
 
         _ => None,
     }
 }
 
-fn recalculate_screen(
-    display: &glium::Display,
-    texture: &mut glium::texture::texture2d::Texture2d,
-    datavec: &[u8],
-) {
-    use glium::Surface;
+fn recalculate_screen(datavec: &[u8]) {
+    execute!(io::stdout(), BeginSynchronizedUpdate).unwrap();
+
+    queue!(
+        stdout(),
+        // terminal::Clear(ClearType::All),
+        // terminal::SetSize(
+        //     rustic_yellow::SCREEN_W as u16,
+        //     rustic_yellow::SCREEN_H as u16
+        // ),
+        cursor::MoveTo(0, 0),
+    )
+    .unwrap();
 
     let rawimage2d = glium::texture::RawImage2d {
         data: std::borrow::Cow::Borrowed(datavec),
@@ -179,30 +197,105 @@ fn recalculate_screen(
         height: rustic_yellow::SCREEN_H as u32,
         format: glium::texture::ClientFormat::U8U8U8,
     };
-    texture.write(
-        glium::Rect {
-            left: 0,
-            bottom: 0,
-            width: rustic_yellow::SCREEN_W as u32,
-            height: rustic_yellow::SCREEN_H as u32,
-        },
-        rawimage2d,
-    );
 
-    // We use a custom BlitTarget to transform OpenGL coordinates to row-column coordinates
-    let target = display.draw();
-    let (target_w, target_h) = target.get_dimensions();
-    texture.as_surface().blit_whole_color_to(
-        &target,
-        &glium::BlitTarget {
-            left: 0,
-            bottom: target_h,
-            width: target_w as i32,
-            height: -(target_h as i32),
-        },
-        glium::uniforms::MagnifySamplerFilter::Nearest,
-    );
-    target.finish().unwrap();
+    let raw_data = rawimage2d.data.into_owned();
+
+    // Step 2: Convert Vec<u8> to ImageBuffer
+    let img_buffer =
+        image::ImageBuffer::from_raw(rawimage2d.width, rawimage2d.height, raw_data).unwrap();
+
+    // Step 3: Convert ImageBuffer to DynamicImage
+    let dynamic_image = image::DynamicImage::ImageRgb8(img_buffer);
+
+    // Now you can convert the DynamicImage to ASCII
+    let mut config_builder = artem::config::ConfigBuilder::new();
+    config_builder.target(TargetType::Shell(true, true));
+
+    config_builder.dimension(config::ResizingDimension::Width);
+
+    // let target_size = if width || height {
+    //     if height {
+    //         config_builder.dimension(config::ResizingDimension::Height);
+    //     }
+    //     terminal_size(height)
+    // } else {
+    //     //use given input size
+    //     log::trace!("Using user input size as target size");
+    //     0
+    // }
+    // .max(20); //min should be 20 to ensure a somewhat visible picture
+
+    // log::debug!("Target Size: {target_size}");
+    let wsize = crossterm::terminal::window_size().unwrap();
+    let w_width = wsize.width as u32;
+    let cols = wsize.columns as u32;
+    config_builder.target_size(NonZeroU32::new(cols).unwrap()); //safe to unwrap, since it is clamped before
+    let target_img_size = 1024; //terminal_size(width).max(2048);
+
+    //best ratio between height and width is 0.43
+    let guess_scale = |target_size: u32| -> f32 {
+        let target_size = target_size as f32;
+        let scale = (target_size * 0.43) / (rustic_yellow::SCREEN_W as f32);
+        scale.clamp(0.1, 5.0)
+    };
+
+    let matches_scales = |target_size: u32, scale: f32| -> bool {
+        let target_size = target_size as f32;
+        let scale = (target_size * 0.43) / (rustic_yellow::SCREEN_W as f32);
+        (scale - 0.1..=scale + 0.1).contains(&scale)
+    };
+
+    let scale = 0.3; //guess_scale(cols);
+                     // eprintln!("Scale: {}", scale);
+    config_builder.scale(scale);
+
+    // config_builder.center_x(true);
+    // config_builder.center_y(true);
+    config_builder.hysteresis(true);
+    config_builder.characters(" .:-=+*#%@".to_string());
+
+    let config = config_builder.build();
+
+    // let scaled_image: image::DynamicImage = dynamic_image.resize(
+    //     (rustic_yellow::SCREEN_W as f32 * scale) as u32,
+    //     (rustic_yellow::SCREEN_H as f32 * scale) as u32,
+    //     image::imageops::FilterType::Nearest,
+    // );
+    // Write the scaled image to a file
+    // scaled_image.save("scaled_image.png").unwrap();
+
+    let ascii_art = artem::convert(dynamic_image, &config);
+
+    // texture.write(
+    //     glium::Rect {
+    //         left: 0,
+    //         bottom: 0,
+    //         width: rustic_yellow::SCREEN_W as u32,
+    //         height: rustic_yellow::SCREEN_H as u32,
+    //     },
+    //     rawimage2d,
+    // );
+
+    // // We use a custom BlitTarget to transform OpenGL coordinates to row-column coordinates
+    // let target = display.draw();
+    // let (target_w, target_h) = target.get_dimensions();
+    // texture.as_surface().blit_whole_color_to(
+    //     &target,
+    //     &glium::BlitTarget {
+    //         left: 0,
+    //         bottom: target_h,
+    //         width: target_w as i32,
+    //         height: -(target_h as i32),
+    //     },
+    //     glium::uniforms::MagnifySamplerFilter::Nearest,
+    // );
+    // target.finish().unwrap();
+    for line in ascii_art.lines() {
+        queue!(io::stdout(), style::Print(line)).unwrap();
+    }
+
+    execute!(io::stdout(), EndSynchronizedUpdate).unwrap();
+    io::stdout().flush().unwrap();
 }
 
 fn run_game(
@@ -225,16 +318,16 @@ fn timer_periodic(delay: Arc<AtomicU64>) -> Receiver<()> {
     rx
 }
 
-fn set_window_size(window: &glium::glutin::window::Window) {
-    use glium::glutin::dpi::{LogicalSize, PhysicalSize};
+// fn set_window_size(window: &glium::glutin::window::Window) {
+//     use glium::glutin::dpi::{LogicalSize, PhysicalSize};
 
-    let dpi = window.scale_factor();
+//     let dpi = window.scale_factor();
 
-    let physical_size = PhysicalSize::<u32>::from((
-        rustic_yellow::SCREEN_W as u32,
-        rustic_yellow::SCREEN_H as u32,
-    ));
-    let logical_size = LogicalSize::<u32>::from_physical(physical_size, dpi);
+//     let physical_size = PhysicalSize::<u32>::from((
+//         rustic_yellow::SCREEN_W as u32,
+//         rustic_yellow::SCREEN_H as u32,
+//     ));
+//     let logical_size = LogicalSize::<u32>::from_physical(physical_size, dpi);
 
-    window.set_inner_size(logical_size);
-}
+//     window.set_inner_size(logical_size);
+// }
