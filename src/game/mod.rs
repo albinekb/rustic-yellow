@@ -16,10 +16,8 @@ pub mod scripts;
 
 pub fn resources_root() -> Option<PathBuf> {
     if std::env::var_os("CARGO").is_some() {
-        println!("cargo");
         let p = Some(PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR")?));
 
-        println!("{:?}", p);
         return p;
     }
 
@@ -60,5 +58,15 @@ impl Game {
 
     pub fn sync_audio(&mut self) {
         self.cpu.sync_audio()
+    }
+
+    pub fn quit(&mut self) {
+        self.cpu.call(0x10)
+    }
+}
+
+impl Drop for Game {
+    fn drop(&mut self) {
+        self.quit()
     }
 }
