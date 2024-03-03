@@ -92,6 +92,10 @@ impl CachedSixel {
         }
     }
 
+    pub fn get_sixel(&self) -> String {
+        self.sixel.clone()
+    }
+
     pub fn tick(&mut self, bytes: &[u8]) -> Option<Change> {
         let data: Vec<u8> = encode_raw(
             bytes,
@@ -174,6 +178,72 @@ fn diff(
 
     Some(changes)
 }
+
+use ratatui::{buffer::Buffer, layout};
+
+pub fn render_sixel(
+    rect: layout::Rect,
+    data: &str,
+    area: layout::Rect,
+    buf: &mut Buffer,
+    overdraw: bool,
+) {
+    let render_area = match render_area(rect, area, overdraw) {
+        None => {
+            // If we render out of area, then the buffer will attempt to write regular text (or
+            // possibly other sixels) over the image.
+            //
+            // On some implementations (e.g. Xterm), this actually works but the image is
+            // forever overwritten since we won't write out the same sixel data for the same
+            // (col,row) position again (see buffer diffing).
+            // Thus, when the area grows, the newly available cells will skip rendering and
+            // leave artifacts instead of the image data.
+            //
+            // On some implementations (e.g. ???), only text with its foreground color is
+            // overlayed on the image, also forever overwritten.
+            //
+            // On some implementations (e.g. patched Alactritty), image graphics are never
+            // overwritten and simply draw over other UI elements.
+            //
+            // Note that [ResizeProtocol] forces to ignore this early return, since it will
+            // always resize itself to the area.
+            return;
+        }
+        Some(r) => r,
+    };
+
+    buf.get_mut(render_area.left(), render_area.top())
+        .set_symbol(data);
+    let mut skip_first = false;
+
+    // Skip entire area
+    for y in render_area.top()..render_area.bottom() {
+        for x in render_area.left()..render_area.right() {
+            if !skip_first {
+                skip_first = true;
+                continue;
+            }
+            buf.get_mut(x, y).set_skip(true);
+        }
+    }
+}
+
+fn render_area(rect: layout::Rect, area: layout::Rect, overdraw: bool) -> Option<layout::Rect> {
+    if overdraw {
+        return Some(layout::Rect::new(
+            area.x,
+            area.y,
+            min(rect.width, area.width),
+            min(rect.height, area.height),
+        ));
+    }
+
+    if rect.width > area.width || rect.height > area.height {
+        return None;
+    }
+    Some(layout::Rect::new(area.x, area.y, rect.width, rect.height))
+}
+
 // fn render(rect: Rect, data: &str, area: Rect, buf: &mut Buffer, overdraw: bool) {
 //     let render_area = match render_area(rect, area, overdraw) {
 //         None => {

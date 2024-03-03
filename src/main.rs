@@ -3,8 +3,8 @@ use human_panic::setup_panic;
 use artem::config::{self, TargetType};
 use clap::Parser;
 
+use rustic_yellow::frame::shape::draw_custom_shape;
 use rustic_yellow::{Game, KeyboardEvent, PokemonSpecies};
-
 use std::io::{self, stdout};
 
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -69,6 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let gamethread = thread::spawn(move || run_game(sender2, receiver1, starter));
 
+    let timer = timer_periodic(render_delay.clone());
+
     let rnd_delay = render_delay.load(std::sync::atomic::Ordering::Relaxed);
 
     let mut stop = false;
@@ -77,7 +79,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cached_sixel = CachedSixel::new(rustic_yellow::SCREEN_W, rustic_yellow::SCREEN_H);
 
+    draw_custom_shape!(buffered_terminal, [0, 0, 10, 0, 5, 5], White, true);
+
     loop {
+        timer.recv().unwrap();
         if stop {
             break;
         }
@@ -90,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let seqno = buffered_terminal.current_seqno();
                 recalculate_screen(&data, &mut buffered_terminal, &mut cached_sixel);
                 if buffered_terminal.has_changes(seqno) {
-                    buffered_terminal.flush()?;
+                    buffered_terminal.flush().unwrap();
                 }
             }
             Err(mpsc::TryRecvError::Empty) => (),
@@ -132,74 +137,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // let mut input_evt = tokio::task::spawn_blocking(|| terminal.poll_input(None)).fuse();
-
-        // select! {
-        //     _ = delay => {
-        //         if stop {
-        //             break;
-        //         }
-
-        //  },
-
-        //     maybe_event = input_evt => {
-        //         match maybe_event {
-        //             Ok(Ok(event)) => {
-
-        //                     match event.unwrap() {
-
-        //                         InputEvent::Key(keyevt) => {
-
-        //                             if let Some(key) = key_to_keyboard(keyevt) {
-        //                                 let _ = sender1.send(KeyboardEvent::Down {
-        //                                     key,
-        //                                     shift: false,
-        //                                 });
-        //                             }
-        //                         }
-        //                         _ => (),
-        //                     }
-
-        //             // match  event {
-        //             //     Event::Key(event) => match event.code {
-        //             //         KeyCode::Esc => stop = true,
-        //             //         _ => {
-        //             //             if let Some(key) = crossterm_to_keyboard(event.code) {
-        //             //                 let _ = sender1.send(KeyboardEvent::Down {
-        //             //                     key,
-        //             //                     shift: event
-        //             //                         .modifiers
-        //             //                         .contains(crossterm::event::KeyModifiers::SHIFT),
-        //             //                 });
-        //             //             }
-        //             //         }
-        //             //     },
-        //             //     Event::Mouse(event) => {
-        //             //         // println!("{:?}", event);
-        //             //     }
-        //             //     _ => (),
-        //             // }
-        //         },
-        //         Ok(Err(e)) => {
-        //             eprintln!("Error reading input: {}", e);
-        //             stop = true;
-        //         }
-        //         Err(e) => {
-        //             eprintln!("Error reading input: {}", e);
-        //             stop = true;
-        //         }
-
-        //     }
-        //     }
-        // }
-
         if stop {
             break;
         }
     }
-    println!("Exiting");
 
-    let _ = gamethread.join();
+    println!("Exiting");
+    sender1.send(KeyboardEvent::Down {
+        key: rustic_yellow::KeyboardKey::Escape,
+        shift: false,
+    });
+    gamethread.join().unwrap();
+    println!("Game thread joined");
+
     buffered_terminal.add_change(Change::ClearScreen(Default::default()));
     buffered_terminal.add_change(Change::CursorVisibility(CursorVisibility::Visible));
     buffered_terminal.repaint()?;

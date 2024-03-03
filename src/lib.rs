@@ -6,6 +6,7 @@ pub use crate::keypad::{KeyboardEvent, KeyboardKey};
 pub use crate::save_state::PokemonSpecies;
 
 pub(crate) mod cpu;
+pub mod frame;
 pub(crate) mod game;
 mod game_state;
 mod gpu;
