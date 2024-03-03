@@ -3,7 +3,6 @@ use human_panic::setup_panic;
 use artem::config::{self, TargetType};
 use clap::Parser;
 
-use rustic_yellow::frame::shape::draw_custom_shape;
 use rustic_yellow::{Game, KeyboardEvent, PokemonSpecies};
 use std::io::{self, stdout};
 
@@ -78,8 +77,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let surface = termwiz::surface::Surface::new(rustic_yellow::SCREEN_W, rustic_yellow::SCREEN_H);
 
     let mut cached_sixel = CachedSixel::new(rustic_yellow::SCREEN_W, rustic_yellow::SCREEN_H);
-
-    draw_custom_shape!(buffered_terminal, [0, 0, 10, 0, 5, 5], White, true);
 
     loop {
         timer.recv().unwrap();
